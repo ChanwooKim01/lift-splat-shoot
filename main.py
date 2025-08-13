@@ -18,4 +18,7 @@ if __name__ == '__main__':
         'eval_model_iou': src.explore.eval_model_iou,
         'viz_model_preds': src.explore.viz_model_preds,
         'export_model_onnx': src.explore.export_model_onnx,
+        'viz_model_preds_trt': src.trt_test.viz_model_preds_trt,
+        'viz_onnx': src.explore.viz_onnx,
+        'compare_trt_and_onnx': src.trt_test.compare_trt_and_onnx,
     })

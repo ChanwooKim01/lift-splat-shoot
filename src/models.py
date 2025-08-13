@@ -153,9 +153,30 @@ class LiftSplatShoot(nn.Module):
         self.use_quickcumsum = False
         
     # for onnx export
-    def inv(self, S):
-       Sinv = np.linalg.inv(S.detach().cpu().numpy())
-       return torch.from_numpy(Sinv).to(S.device)
+    # def inv(self, S):
+    #    Sinv = np.linalg.inv(S.detach().cpu().numpy())
+    #    return torch.from_numpy(Sinv).to(S.device)
+    def safe_inverse_3x3(self, M, eps=1e-8):
+        a,b,c = M[...,0,0], M[...,0,1], M[...,0,2]
+        d,e,f = M[...,1,0], M[...,1,1], M[...,1,2]
+        g,h,i = M[...,2,0], M[...,2,1], M[...,2,2]
+        A = e*i - f*h
+        B = -(d*i - f*g)
+        C = d*h - e*g
+        D = -(b*i - c*h)
+        E = a*i - c*g
+        F = -(a*h - b*g)
+        G = b*f - c*e
+        H = -(a*f - c*d)
+        I = a*e - b*d
+        det = a*A + b*B + c*C
+        det = det.clamp(min=eps)
+        inv = torch.stack([
+            torch.stack([A, D, G], -1),
+            torch.stack([B, E, H], -1),
+            torch.stack([C, F, I], -1)
+        ], -2)
+        return inv / det.unsqueeze(-1).unsqueeze(-1)
         
     def create_frustum(self):
         # make grid in image plane
@@ -181,14 +202,20 @@ class LiftSplatShoot(nn.Module):
         # B x N x D x H x W x 3
         points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3)
         # points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
-        points = self.inv(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        # points = self.inv(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
 
+        post_rots_inv = self.safe_inverse_3x3(post_rots)
+        points = post_rots_inv.view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
         # cam_to_ego
         points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
                             points[:, :, :, :, :, 2:3]
                             ), 5)
         # combine = rots.matmul(torch.inverse(intrins))
-        combine = rots.matmul(self.inv(intrins))
+        
+        # combine = rots.matmul(self.inv(intrins))
+        intrins_inv = self.safe_inverse_3x3(intrins)
+        combine = rots.matmul(intrins_inv)
+        
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += trans.view(B, N, 1, 1, 1, 3)
 
@@ -264,6 +291,15 @@ class LiftSplatShoot(nn.Module):
             idx_b = linear_idx.index_select(0, pos)              # [M]
             x_b = x.index_select(0, pos).transpose(0, 1)         # [C, M]
             final_flat[b].index_add_(1, idx_b, x_b)              # 중복 인덱스 합산
+        
+        # 정적 그래프 변환을 위해 batch 1이라고 가정하고 for문 해제
+        # pos = torch.nonzero(geom_feats[:, 3] == 0, as_tuple=False).squeeze(1)
+        # idx_b = linear_idx.index_select(0, pos)
+        # x_b = x.index_select(0, pos).transpose(0, 1)
+        
+        # final_flat[0].index_add_(1, idx_b, x_b)
+        S = torch.nn.functional.one_hot(idx_b.to(torch.int64), num_classes=K).to(x_b.dtype)  # [M, K]
+        final_flat[0] = x_b.matmul(S)  # [C, M] @ [M, K] -> [C, K]
 
         final = final_flat.view(B, C, Z, X, Y)
         final = torch.cat(final.unbind(dim=2), 1)
@@ -279,6 +315,7 @@ class LiftSplatShoot(nn.Module):
         return x
 
     def forward(self, x, rots, trans, intrins, post_rots, post_trans):
+        print(x.shape, rots.shape, trans.shape, intrins.shape, post_rots.shape, post_trans.shape)
         x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
         x = self.bevencode(x)
         return x

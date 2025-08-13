@@ -139,3 +139,6 @@ imagenet_pretrained/
 *.trt
 *.engine
 *.plan
+
+results/
+ckpts/
