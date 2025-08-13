@@ -19,7 +19,7 @@ from .models import compile_model
 
 
 def lidar_check(version,
-                dataroot='/data/nuscenes',
+                dataroot='/data/nuScenes',
                 show_lidar=True,
                 viz_train=False,
                 nepochs=1,
@@ -361,3 +361,91 @@ def viz_model_preds(version,
                 print('saving', imname)
                 plt.savefig(imname)
                 counter += 1
+
+def export_model_onnx(version,
+                    modelf = 'runs/model1000.pt',
+                    dataroot='data/nuScenes',
+                    map_folder='data/nuScenes',
+                    gpuid=0,
+                    viz_train=False,
+                    
+                    H=900, W=1600,
+                    resize_lim=(0.193, 0.225),
+                    final_dim=(128, 352),
+                    bot_pct_lim=(0.0, 0.22),
+                    rot_lim=(-5.4, 5.4),
+                    rand_flip=True,
+
+                    xbound=[-50.0, 50.0, 0.5],
+                    ybound=[-50.0, 50.0, 0.5],
+                    zbound=[-10.0, 10.0, 20.0],
+                    dbound=[4.0, 45.0, 1.0],
+
+                    bsz=1,
+                    nworkers=10,
+                    ):
+    grid_conf = {
+        'xbound': xbound,
+        'ybound': ybound,
+        'zbound': zbound,
+        'dbound': dbound,
+    }
+    cams = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
+            'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT']
+    data_aug_conf = {
+                    'resize_lim': resize_lim,
+                    'final_dim': final_dim,
+                    'rot_lim': rot_lim,
+                    'H': H, 'W': W,
+                    'rand_flip': rand_flip,
+                    'bot_pct_lim': bot_pct_lim,
+                    'cams': cams,
+                    'Ncams': 5,
+                }
+    trainloader, valloader = compile_data(version, dataroot, data_aug_conf=data_aug_conf,
+                                          grid_conf=grid_conf, bsz=bsz, nworkers=nworkers,
+                                          parser_name='segmentationdata')
+    
+    loader = trainloader if viz_train else valloader
+    nusc_maps = get_nusc_maps(map_folder)
+
+    device = torch.device('cpu') if gpuid < 0 else torch.device(f'cuda:{gpuid}')
+
+    model = compile_model(grid_conf, data_aug_conf, outC=1)
+    print('loading', modelf)
+    model.load_state_dict(torch.load(modelf))
+    model.to(device)
+
+    dx, bx, _ = gen_dx_bx(grid_conf['xbound'], grid_conf['ybound'], grid_conf['zbound'])
+    dx, bx = dx[:2].numpy(), bx[:2].numpy()
+
+    scene2map = {}
+    for rec in loader.dataset.nusc.scene:
+        log = loader.dataset.nusc.get('log', rec['log_token'])
+        scene2map[rec['name']] = log['location']
+
+
+    val = 0.01
+    fH, fW = final_dim
+    fig = plt.figure(figsize=(3*fW*val, (1.5*fW + 2*fH)*val))
+    gs = mpl.gridspec.GridSpec(3, 3, height_ratios=(1.5*fW, fH, fH))
+    gs.update(wspace=0.0, hspace=0.0, left=0.0, right=1.0, top=1.0, bottom=0.0)
+
+    model.camencode.trunk.set_swish(memory_efficient=False)
+    model.eval()
+    counter = 0
+    with torch.no_grad():
+        for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs) in enumerate(loader):
+            if counter > 0:
+                break
+
+            onnx_path = "liftsplatshoot.onnx"
+            torch.onnx.export(
+                model,
+                (imgs.to(device), rots.to(device), trans.to(device), intrins.to(device), post_rots.to(device), post_trans.to(device)),
+                onnx_path,
+                export_params=True,
+                opset_version=17,
+                do_constant_folding=True
+            )
+            counter += 1

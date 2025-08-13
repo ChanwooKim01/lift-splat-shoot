@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from efficientnet_pytorch import EfficientNet
 from torchvision.models.resnet import resnet18
+import numpy as np
 
 from .tools import gen_dx_bx, cumsum_trick, QuickCumsum
 
@@ -148,8 +149,14 @@ class LiftSplatShoot(nn.Module):
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
 
         # toggle using QuickCumsum vs. autograd
-        self.use_quickcumsum = True
-    
+        # self.use_quickcumsum = True
+        self.use_quickcumsum = False
+        
+    # for onnx export
+    def inv(self, S):
+       Sinv = np.linalg.inv(S.detach().cpu().numpy())
+       return torch.from_numpy(Sinv).to(S.device)
+        
     def create_frustum(self):
         # make grid in image plane
         ogfH, ogfW = self.data_aug_conf['final_dim']
@@ -173,13 +180,15 @@ class LiftSplatShoot(nn.Module):
         # undo post-transformation
         # B x N x D x H x W x 3
         points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3)
-        points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        # points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
+        points = self.inv(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
 
         # cam_to_ego
         points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
                             points[:, :, :, :, :, 2:3]
                             ), 5)
-        combine = rots.matmul(torch.inverse(intrins))
+        # combine = rots.matmul(torch.inverse(intrins))
+        combine = rots.matmul(self.inv(intrins))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += trans.view(B, N, 1, 1, 1, 3)
 
@@ -219,24 +228,44 @@ class LiftSplatShoot(nn.Module):
         geom_feats = geom_feats[kept]
 
         # get tensors from the same voxel next to each other
-        ranks = geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B)\
-            + geom_feats[:, 1] * (self.nx[2] * B)\
-            + geom_feats[:, 2] * B\
-            + geom_feats[:, 3]
-        sorts = ranks.argsort()
-        x, geom_feats, ranks = x[sorts], geom_feats[sorts], ranks[sorts]
+        # ranks = geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B)\
+        #     + geom_feats[:, 1] * (self.nx[2] * B)\
+        #     + geom_feats[:, 2] * B\
+        #     + geom_feats[:, 3]
+        # sorts = ranks.argsort()
+        # x, geom_feats, ranks = x[sorts], geom_feats[sorts], ranks[sorts]
 
-        # cumsum trick
-        if not self.use_quickcumsum:
-            x, geom_feats = cumsum_trick(x, geom_feats, ranks)
-        else:
-            x, geom_feats = QuickCumsum.apply(x, geom_feats, ranks)
+        # # cumsum trick
+        # if not self.use_quickcumsum:
+        #     x, geom_feats = cumsum_trick(x, geom_feats, ranks)
+        # else:
+        #     x, geom_feats = QuickCumsum.apply(x, geom_feats, ranks)
 
         # griddify (B x C x Z x X x Y)
-        final = torch.zeros((B, C, self.nx[2], self.nx[0], self.nx[1]), device=x.device)
-        final[geom_feats[:, 3], :, geom_feats[:, 2], geom_feats[:, 0], geom_feats[:, 1]] = x
+        Z = int(self.nx[2].item())
+        X = int(self.nx[0].item())
+        Y = int(self.nx[1].item())
+        K = Z * X * Y
+        final_flat = torch.zeros((B, C, K), device=x.device)
+        # final[geom_feats[:, 3], :, geom_feats[:, 2], geom_feats[:, 0], geom_feats[:, 1]] = x
+        
+        linear_idx = (
+            geom_feats[:, 3] * (self.nx[2] * self.nx[0] * self.nx[1]) +
+            geom_feats[:, 2] * (self.nx[0] * self.nx[1]) +
+            geom_feats[:, 0] * self.nx[1] +
+            geom_feats[:, 1]
+        )  # shape: [N_kept]
 
-        # collapse Z
+        # 배치별 누적
+        for b in range(B):
+            pos = torch.nonzero(geom_feats[:, 3] == b, as_tuple=False).squeeze(1)  # [M]
+            if pos.numel() == 0:
+                continue
+            idx_b = linear_idx.index_select(0, pos)              # [M]
+            x_b = x.index_select(0, pos).transpose(0, 1)         # [C, M]
+            final_flat[b].index_add_(1, idx_b, x_b)              # 중복 인덱스 합산
+
+        final = final_flat.view(B, C, Z, X, Y)
         final = torch.cat(final.unbind(dim=2), 1)
 
         return final
