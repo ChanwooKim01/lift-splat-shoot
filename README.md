@@ -10,3 +10,8 @@ python main.py trainval
 ```
 python main.py export_model_onnx mini runs/model{X}.pt # 원하는 모델 pt 파일 변환
 ```
+
+## trtexec을 통한 모델 최종 변환
+```
+/usr/src/tensorrt/bin/trtexec --onnx=liftsplatshoot.onnx --saveEngine=liftsplatshoot.trt --fp16
+```
