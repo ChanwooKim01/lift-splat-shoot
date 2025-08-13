@@ -290,7 +290,6 @@ class LiftSplatShoot(nn.Module):
                 continue
             idx_b = linear_idx.index_select(0, pos)              # [M]
             x_b = x.index_select(0, pos).transpose(0, 1)         # [C, M]
-            final_flat[b].index_add_(1, idx_b, x_b)              # 중복 인덱스 합산
         
         # 정적 그래프 변환을 위해 batch 1이라고 가정하고 for문 해제
         # pos = torch.nonzero(geom_feats[:, 3] == 0, as_tuple=False).squeeze(1)

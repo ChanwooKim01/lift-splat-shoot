@@ -40,6 +40,9 @@ class TRTEngineRunner:
             self.host_mem.append(h_mem)
             self.dev_mem.append(d_mem)
             self.bindings[i] = int(d_mem)
+            
+        self.starter = torch.cuda.Event(enable_timing=True)
+        self.ender = torch.cuda.Event(enable_timing=True)
 
     def infer(self, inputs_dict):
         # inputs_dict: {binding_name: np.ndarray (맞는 shape/dtype)}
@@ -205,7 +208,11 @@ def viz_model_preds_trt(version,
                 name_post_rots: post_rots_np,
                 name_post_trans: post_trans_np,
             }
+            # runner.starter.record()
             outputs = runner.infer(inputs)
+            # runner.ender.record()
+            # torch.cuda.synchronize()
+            # print(f"TRT inference time: {runner.starter.elapsed_time(runner.ender):.2f}ms")
             out = outputs[out_name]  # shape: [1, 1, 200, 200] 등
             out_t = torch.tensor(out).sigmoid().cpu()
             # out = 1.0 / (1.0 + np.exp(-out))  # sigmoid
