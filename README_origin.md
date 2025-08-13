@@ -1,6 +1,6 @@
-# LSS-TensorRT
+# Lift, Splat, Shoot: Encoding Images From Arbitrary Camera Rigs by Implicitly Unprojecting to 3D
 
-PyTorch code for Lift-Splat-Shoot and it's ONNX export (ECCV 2020).
+PyTorch code for Lift-Splat-Shoot (ECCV 2020).
 
 **Lift, Splat, Shoot: Encoding Images From Arbitrary Camera Rigs by Implicitly Unprojecting to 3D**  
 Jonah Philion, [Sanja Fidler](http://www.cs.toronto.edu/~fidler/)\
