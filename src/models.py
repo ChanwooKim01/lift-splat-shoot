@@ -30,6 +30,8 @@ class Up(nn.Module):
         )
 
     def forward(self, x1, x2):
+        x1 = x1
+        x2 = x2
         x1 = self.up(x1)
         x1 = torch.cat([x2, x1], dim=1)
         return self.conv(x1)
@@ -47,15 +49,19 @@ class CamEncode(nn.Module):
         self.depthnet = nn.Conv2d(512, self.D + self.C, kernel_size=1, padding=0)
 
     def get_depth_dist(self, x, eps=1e-20):
+        x = x
         return x.softmax(dim=1)
 
     def get_depth_feat(self, x):
+        x = x
         x = self.get_eff_depth(x)
         # Depth
         x = self.depthnet(x)
 
         depth = self.get_depth_dist(x[:, :self.D])
         new_x = depth.unsqueeze(1) * x[:, self.D:(self.D + self.C)].unsqueeze(2)
+
+        new_x = new_x
 
         return depth, new_x
 
@@ -153,9 +159,6 @@ class LiftSplatShoot(nn.Module):
         self.use_quickcumsum = False
         
     # for onnx export
-    # def inv(self, S):
-    #    Sinv = np.linalg.inv(S.detach().cpu().numpy())
-    #    return torch.from_numpy(Sinv).to(S.device)
     def safe_inverse_3x3(self, M, eps=1e-8):
         a,b,c = M[...,0,0], M[...,0,1], M[...,0,2]
         d,e,f = M[...,1,0], M[...,1,1], M[...,1,2]
@@ -176,7 +179,7 @@ class LiftSplatShoot(nn.Module):
             torch.stack([B, E, H], -1),
             torch.stack([C, F, I], -1)
         ], -2)
-        return inv / det.unsqueeze(-1).unsqueeze(-1)
+        return (inv / det.unsqueeze(-1).unsqueeze(-1))
         
     def create_frustum(self):
         # make grid in image plane
@@ -201,8 +204,8 @@ class LiftSplatShoot(nn.Module):
         # undo post-transformation
         # B x N x D x H x W x 3
         points = self.frustum - post_trans.view(B, N, 1, 1, 1, 3)
+        points = points
         # points = torch.inverse(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
-        # points = self.inv(post_rots).view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
 
         post_rots_inv = self.safe_inverse_3x3(post_rots)
         points = post_rots_inv.view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1))
@@ -211,8 +214,6 @@ class LiftSplatShoot(nn.Module):
                             points[:, :, :, :, :, 2:3]
                             ), 5)
         # combine = rots.matmul(torch.inverse(intrins))
-        
-        # combine = rots.matmul(self.inv(intrins))
         intrins_inv = self.safe_inverse_3x3(intrins)
         combine = rots.matmul(intrins_inv)
         
@@ -248,11 +249,39 @@ class LiftSplatShoot(nn.Module):
         geom_feats = torch.cat((geom_feats, batch_ix), 1)
 
         # filter out points that are outside box
-        kept = (geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < self.nx[0])\
-            & (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < self.nx[1])\
-            & (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < self.nx[2])
+        # kept = (geom_feats[:, 0] >= 0) & (geom_feats[:, 0] < self.nx[0])\
+        #     & (geom_feats[:, 1] >= 0) & (geom_feats[:, 1] < self.nx[1])\
+        #     & (geom_feats[:, 2] >= 0) & (geom_feats[:, 2] < self.nx[2])
+        nx_val = self.nx.to(x.device)
+        zeros = torch.zeros_like(geom_feats[:, 0])
+        kept_x = (geom_feats[:, 0] >= zeros) & (geom_feats[:, 0] < nx_val[0])
+        kept_y = (geom_feats[:, 1] >= zeros) & (geom_feats[:, 1] < nx_val[1])
+        kept_z = (geom_feats[:, 2] >= zeros) & (geom_feats[:, 2] < nx_val[2])
+
+        kept = kept_x & kept_y & kept_z
         x = x[kept]
         geom_feats = geom_feats[kept]
+        
+        # Use a fully ONNX-compatible method (One-Hot + MatMul) for aggregation.
+        nx_x, nx_y, nx_z = nx_val[0], nx_val[1], nx_val[2]
+        K = int(nx_x * nx_y * nx_z)
+
+        ranks = geom_feats[:, 3] * K + \
+                geom_feats[:, 2] * (nx_x * nx_y) + \
+                geom_feats[:, 0] * nx_y + \
+                geom_feats[:, 1]
+        ranks = ranks.long()
+
+        one_hot = torch.nn.functional.one_hot(ranks, num_classes=B * K).float()
+        
+        final_very_flat = (one_hot.transpose(0, 1) @ x)
+
+        final_flat = final_very_flat.view(B, K, C).permute(0, 2, 1)
+        final = final_flat.view(B, C, int(nx_z), int(nx_x), int(nx_y))
+        
+        final = torch.cat(final.unbind(dim=2), 1)
+        
+        return final
 
         # get tensors from the same voxel next to each other
         # ranks = geom_feats[:, 0] * (self.nx[1] * self.nx[2] * B)\
@@ -269,41 +298,41 @@ class LiftSplatShoot(nn.Module):
         #     x, geom_feats = QuickCumsum.apply(x, geom_feats, ranks)
 
         # griddify (B x C x Z x X x Y)
-        Z = int(self.nx[2].item())
-        X = int(self.nx[0].item())
-        Y = int(self.nx[1].item())
-        K = Z * X * Y
-        final_flat = torch.zeros((B, C, K), device=x.device)
+        # Z = int(self.nx[2].item())
+        # X = int(self.nx[0].item())
+        # Y = int(self.nx[1].item())
+        # K = Z * X * Y
+        # final_flat = torch.zeros((B, C, K), device=x.device)
         # final[geom_feats[:, 3], :, geom_feats[:, 2], geom_feats[:, 0], geom_feats[:, 1]] = x
         
-        linear_idx = (
-            geom_feats[:, 3] * (self.nx[2] * self.nx[0] * self.nx[1]) +
-            geom_feats[:, 2] * (self.nx[0] * self.nx[1]) +
-            geom_feats[:, 0] * self.nx[1] +
-            geom_feats[:, 1]
-        )  # shape: [N_kept]
+        # linear_idx = (
+        #     geom_feats[:, 3] * (self.nx[2] * self.nx[0] * self.nx[1]) +
+        #     geom_feats[:, 2] * (self.nx[0] * self.nx[1]) +
+        #     geom_feats[:, 0] * self.nx[1] +
+        #     geom_feats[:, 1]
+        # )  # shape: [N_kept]
 
-        # 배치별 누적
-        for b in range(B):
-            pos = torch.nonzero(geom_feats[:, 3] == b, as_tuple=False).squeeze(1)  # [M]
-            if pos.numel() == 0:
-                continue
-            idx_b = linear_idx.index_select(0, pos)              # [M]
-            x_b = x.index_select(0, pos).transpose(0, 1)         # [C, M]
+        # # 배치별 누적
+        # for b in range(B):
+        #     pos = torch.nonzero(geom_feats[:, 3] == b, as_tuple=False).squeeze(1)  # [M]
+        #     if pos.numel() == 0:
+        #         continue
+        #     idx_b = linear_idx.index_select(0, pos)              # [M]
+        #     x_b = x.index_select(0, pos).transpose(0, 1)         # [C, M]
         
-        # 정적 그래프 변환을 위해 batch 1이라고 가정하고 for문 해제
-        # pos = torch.nonzero(geom_feats[:, 3] == 0, as_tuple=False).squeeze(1)
-        # idx_b = linear_idx.index_select(0, pos)
-        # x_b = x.index_select(0, pos).transpose(0, 1)
+        # # 정적 그래프 변환을 위해 batch 1이라고 가정하고 for문 해제
+        # # pos = torch.nonzero(geom_feats[:, 3] == 0, as_tuple=False).squeeze(1)
+        # # idx_b = linear_idx.index_select(0, pos)
+        # # x_b = x.index_select(0, pos).transpose(0, 1)
         
-        # final_flat[0].index_add_(1, idx_b, x_b)
-        S = torch.nn.functional.one_hot(idx_b.to(torch.int64), num_classes=K).to(x_b.dtype)  # [M, K]
-        final_flat[0] = x_b.matmul(S)  # [C, M] @ [M, K] -> [C, K]
+        # # final_flat[0].index_add_(1, idx_b, x_b)
+        # S = torch.nn.functional.one_hot(idx_b.to(torch.int64), num_classes=K).to(x_b.dtype)  # [M, K]
+        # final_flat[0] = x_b.matmul(S)  # [C, M] @ [M, K] -> [C, K]
 
-        final = final_flat.view(B, C, Z, X, Y)
-        final = torch.cat(final.unbind(dim=2), 1)
+        # final = final_flat.view(B, C, Z, X, Y)
+        # final = torch.cat(final.unbind(dim=2), 1)
 
-        return final
+        # return final
 
     def get_voxels(self, x, rots, trans, intrins, post_rots, post_trans):
         geom = self.get_geometry(rots, trans, intrins, post_rots, post_trans)
@@ -314,7 +343,13 @@ class LiftSplatShoot(nn.Module):
         return x
 
     def forward(self, x, rots, trans, intrins, post_rots, post_trans):
-        print(x.shape, rots.shape, trans.shape, intrins.shape, post_rots.shape, post_trans.shape)
+        # print(x.shape, rots.shape, trans.shape, intrins.shape, post_rots.shape, post_trans.shape)
+        x = x
+        rots = rots
+        trans = trans
+        intrins = intrins
+        post_rots = post_rots
+        post_trans = post_trans
         x = self.get_voxels(x, rots, trans, intrins, post_rots, post_trans)
         x = self.bevencode(x)
         return x
@@ -322,3 +357,4 @@ class LiftSplatShoot(nn.Module):
 
 def compile_model(grid_conf, data_aug_conf, outC):
     return LiftSplatShoot(grid_conf, data_aug_conf, outC)
+

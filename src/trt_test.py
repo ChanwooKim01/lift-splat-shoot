@@ -101,7 +101,11 @@ class TRTEngineRunner:
             np.copyto(host_mem[i], arr.ravel())
             cuda.memcpy_htod(dev_mem[i], host_mem[i])
 
+        self.starter.record()  # TRT 실행 시간 측정 시작
         self.context.execute_async_v2(bindings, self.stream.handle)  # 또는 execute_async_v2(stream)
+        self.ender.record()  # TRT 실행 시간 측정 종료
+        torch.cuda.synchronize()  # 동기화
+        print("TRT 실행 시간:", self.starter.elapsed_time(self.ender), "ms")
 
         outputs = {}
         for i in range(self.engine.num_bindings):
@@ -215,9 +219,6 @@ def viz_model_preds_trt(version,
             # print(f"TRT inference time: {runner.starter.elapsed_time(runner.ender):.2f}ms")
             out = outputs[out_name]  # shape: [1, 1, 200, 200] 등
             out_t = torch.tensor(out).sigmoid().cpu()
-            # out = 1.0 / (1.0 + np.exp(-out))  # sigmoid
-            # out_t = torch.from_numpy(out)
-            print(out_t)
             si = 0
             plt.clf()
             for imgi, img in enumerate(imgs[si]):

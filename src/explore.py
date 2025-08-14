@@ -198,8 +198,8 @@ def cumsum_check(version,
 
 def eval_model_iou(version,
                 modelf,
-                dataroot='/data/nuscenes',
-                gpuid=1,
+                dataroot='data/nuScenes',
+                gpuid=0,
 
                 H=900, W=1600,
                 resize_lim=(0.193, 0.225),
@@ -255,7 +255,7 @@ def viz_model_preds(version,
                     modelf,
                     dataroot='data/nuScenes',
                     map_folder='data/nuScenes',
-                    gpuid=1,
+                    gpuid=0,
                     viz_train=False,
 
                     H=900, W=1600,
@@ -319,10 +319,15 @@ def viz_model_preds(version,
     gs = mpl.gridspec.GridSpec(3, 3, height_ratios=(1.5*fW, fH, fH))
     gs.update(wspace=0.0, hspace=0.0, left=0.0, right=1.0, top=1.0, bottom=0.0)
 
+    starter = torch.cuda.Event(enable_timing=True)
+    ender = torch.cuda.Event(enable_timing=True)
+
     model.eval()
     counter = 0
     with torch.no_grad():
         for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs) in enumerate(loader):
+
+            starter.record()  # PT 실행 시간 측정 시작
             out = model(imgs.to(device),
                     rots.to(device),
                     trans.to(device),
@@ -330,8 +335,11 @@ def viz_model_preds(version,
                     post_rots.to(device),
                     post_trans.to(device),
                     )
+            ender.record()  # PT 실행 시간 측정 종료
+            torch.cuda.synchronize()
+            print("PT 실행 시간:", starter.elapsed_time(ender), "ms")
+
             out = out.sigmoid().cpu()
-            print(out)
             for si in range(imgs.shape[0]):
                 plt.clf()
                 for imgi, img in enumerate(imgs[si]):
@@ -451,12 +459,11 @@ def export_model_onnx(version,
                 onnx_path,
                 export_params=True,
                 opset_version=17,
-                do_constant_folding=True,
+                do_constant_folding=False,
                 input_names=['x', 'rots', 'trans', 'intrins', 'post_rots', 'post_trans'],
                 output_names=['out']
             )
             counter += 1
-
 
 def viz_onnx(version,
              onnx_path='liftsplatshoot.onnx',
@@ -536,6 +543,8 @@ def viz_onnx(version,
     gs.update(wspace=0.0, hspace=0.0, left=0.0, right=1.0, top=1.0, bottom=0.0)
 
     counter = 0
+    starter = torch.cuda.Event(enable_timing=True)
+    ender = torch.cuda.Event(enable_timing=True)
     for batchi, (imgs, rots, trans, intrins, post_rots, post_trans, binimgs) in enumerate(loader):
         # 배치 크기 제약 (엔진이 정적일 수 있으므로 1 권장)
         assert imgs.shape[0] == bsz, f'batch size mismatch: got {imgs.shape[0]}, expected {bsz}'
@@ -568,13 +577,16 @@ def viz_onnx(version,
                         feeds[nm] = v
                         break
         # 추론
+        starter.record()  # ORT 실행 시간 측정 시작
         out_list = sess.run(output_names, feeds)
+        ender.record()  # ORT 실행 시간 측정 종료
+        torch.cuda.synchronize()
+        print("ORT 실행 시간:", starter.elapsed_time(ender), "ms")
         out = out_list[0]
         
         # 시그모이드
         # out = 1.0 / (1.0 + np.exp(-out))
         out = torch.tensor(out).sigmoid().cpu()
-        print(out)
         # 시각화 (원본과 동일)
         for si in range(imgs.shape[0]):
             plt.clf()
